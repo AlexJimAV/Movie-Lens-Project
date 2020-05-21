@@ -1,0 +1,464 @@
+---
+title: "HarvadX: MovieLens Project"
+author: "Alejandro Jiménez"
+date: "May 20, 2020"
+output: pdf_document
+---
+
+# Introduction
+
+On October 2, 2006, Netflix launch a contest to predict user ratings for films with a grand prize of 1 million USD. The challenge was to reduce the Root Mean Square Error (RMSE) from their algorithm as much as possible. On September 18, 2009 the winners improved the RMSE up to 0.8567, representing a 10.9% improvement. The importance to of predict user ratings is to recommend movies that may like them and continue using the platform. 
+
+HarvardX: PH125.9x: Capstone project intends to simulate Netflix challenge by using the “MovieLens 10M Datbase” provided by Social Computing Research at the University of Minnesota. The task is to generate an algorithm to predict RMSE less than 0.86490 in a validation data. The RMSE is given by the formula:
+$$ RMSE = \sqrt{\frac{1}{N} \sum_{i}^{N} (\hat{y}_{i}-y_{i})^{2}} $$
+
+## Data Preparation
+
+The data is with the following code provided by HarvardX: PH125.9x: Capstone with some adjustments. These adjustments are installing more packages and setting the time into a year format. The outcome of these is are two data frames: “edx” and “validation”. The second data frame only has the purpose of obtain RMSE by the algorithm. 
+
+It extracts the information from: “http://files.grouplens.org/datasets/movielens/ml-10m.zip”
+
+```{r data, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+# Load data sets for analysis. Code provided by HarvardX: PH125.9x
+
+################################
+# Create edx set, validation set
+################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(stringr)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+#Change format of timestamp to year
+edx <- edx%>% 
+  mutate(timestamp = year(as_datetime(timestamp))) %>% 
+  rename(date = timestamp)
+
+validation <- validation %>% 
+  mutate(timestamp = year(as_datetime(timestamp))) %>% 
+  rename(date = timestamp)
+
+```
+  
+# Data Analysis
+
+First we need to know the names and classes of the variables:
+
+```{r names, echo = FALSE}
+
+sapply(edx,class)
+  
+```
+
+The outcome is the rating and the features to explore are the movie, user, year and genre. Each features is assigned an index to make it easier to identify them in the code and the formulas: i to the movies, u to users, t for the year and g for the genres.  The first thing to do is see the effect of each feature in the rating outcome and the rating distribution by itself. 
+
+## Rating distribution
+The next histogram shows the distribution of the ratings. The possible outcome of ratings are 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5 and 5. The distribution shows that users tend to give an integer rating rather than halves.
+
+```{r rating, echo = FALSE}
+
+edx %>% ggplot(aes(rating)) + geom_histogram(bins = 10) +
+  ggtitle("Rating Distribution") +
+  xlab("Rating") +
+  ylab("Counts")
+
+```
+
+The next plot shows the average rating per the numbers of rating a movie receives. The method used in the smooth was loess. This plot shows that the average rating tends to diverge when movies receives less ratings. It shows that regularization will be needed in the model to constraint this variability.
+
+```{r rating_movie, echo = FALSE}
+
+edx %>% group_by(movieId) %>% summarise(n_movieId=n(),rating = mean(rating)) %>%
+  ggplot(aes(n_movieId,rating)) + 
+  geom_point()+geom_smooth(method=loess) + 
+  ggtitle("Rating vs number of ratings per movie") +
+  xlab("Number of ratings per movie") + ylab("Average rating")
+
+```
+
+As the plot of rating with respect of the number of ratings in a movie; the next plot shows the average rating per number of ratings a user gives. The plot shows that the ratings tend to diverge with less number of ratings a user gives. This confirms that regularization is needed get a better fit of the model.
+
+```{r ratin_user, echo = FALSE}
+
+edx %>% group_by(userId) %>% summarise(n_userID=n(),rating = mean(rating)) %>%
+  ggplot(aes(n_userID,rating)) + 
+  geom_point()+geom_smooth() + 
+  ggtitle("Rating vs number of ratings per user") +
+  xlab("Number of ratings per user") + ylab("Average Rating")
+
+```
+
+Average ratings with respect of the year the movie was premiered also shows certain tendency. The next plot shows this tendency, even though this variability is small, it will be considered in the analysis.
+
+```{r rating_year, echo = FALSE}
+
+edx %>% group_by(date) %>% summarise(rating = mean(rating)) %>%
+  ggplot(aes(date,rating)) + 
+  geom_point()+geom_smooth()+
+  ggtitle("Rating Average vs Year of the movie")+
+  xlab("Year of the movie") +  ylab("Average Rating")
+
+```
+
+
+Each movie may have a combination of 2 or more genres. The ideal approach is to split these genres in every movie to see effect of every individual genre in the rating and in the model fit the genres effect corresponding to every movie. The con of doing this method is the computational cost, the ratio between the edx dataset with induvial rating and combined rating is the following:
+
+```{r ratio_genres, echo = FALSE}
+
+#Create a vector of the genres
+
+genres_vector <- as.vector(str_split(edx$genres,"\\|",simplify = TRUE))
+
+#Remove from the vector values that aren't a genre
+
+genres_vector <- genres_vector[!genres_vector %in% c("(no genres listed)","")]
+
+#Ratio of the vector of genres
+length(genres_vector)/length(edx$genres)
+
+```
+
+At first it doesn’t seems a big increment of data, but this increment goes from around 10 million to 23 million data to analyze; in this range, the computational cost for and ordinary computer is bigger. To reduce this cost it is chosen to leave the combination of genres and fit it in our model like this.
+The next plot show the average rating per movie genre. Since the feature have a class of character, the way to order this data is by increasing rating. The x-scale is removed since the only purpose of this plot is to see if there’s a certain tendency.  In fact it shows that certain genres tend to have lower average ratings than others and in a logit form.
+
+```{r rating_genres, echo = FALSE}
+
+edx %>% group_by(genres) %>% summarise(n = n(),rating =mean(rating)) %>%
+  ggplot(aes(reorder(genres,rating),rating)) + 
+  geom_point() +
+  ggtitle("Rating Average vs number of rating per genre") +
+  xlab("Genres") +  ylab("Average Rating") +
+  theme(axis.text.x=element_blank(), axis.ticks.x=element_blank())
+
+```
+
+## Prediction Model
+
+The next model is proposed:
+$$ \hat{y}_{u,i} = \mu + f(b_{i}) + f(b_{u}) + f(b_{t}) + f(b_{g})$$
+
+Where y is the predicting rating the user ina movie, mu is the average of ratings and f(b) means a function corresponding to each feature that fits in the best possible way. Due to computational limitations, it is necessary a simpler approach; so the next model is proposed: 
+$$ \hat{y}_{u,i} = \mu + b_{i} + b_{u} + b_{t} + b_{g}$$
+
+Where the b's are the effect of each feature linearly. The next formula is used to obtain each feature effect:
+
+$$ \hat{b}_{k,j} = \frac{1}{n_{k,j}} \sum_{q=1}^{n_{k,j}} \left( R_{q} - \hat{\mu} - \sum_{s=1}^{k-1}(b_{s})_{q} \right)$$
+
+The variable are in the equation are describe as:
+$$ k = \{i,u,t,g\} \rightarrow k = \{1,2,3,4\}$$
+$$ j=1,2,...m; \;  \hat{b}_{k} \in \mathbb{R}^{m}$$
+$$ n_{k,j}:\; number\; of \; y_{u,i}\; in \; the\; group \; (k,j)$$
+$$R_{q} = (y_{u,i})_{1}, (y_{u,i})_{2}, ... , (y_{u,i})_{n_{k,j}} $$
+
+The equation describes how to obtain the values of b’s in every feature. The value k is defined to follow an order. So the movie effect is obtain only by subtracting the average, the user by subtracting the corresponding movie effect and the average and so on. The variable R are the ratings that correspond to the group (k, j) and j are the values in the dimension of k with a maximum of m.
+
+Finally to obtain the vector of effects is defined as follows:
+
+
+$$ \hat{b}_k = \{b_{k,1},b_{k,2},...,b_{k,m} \}$$
+To incorporate the regularization it is needed to modify the equation, Where lambda is the regularization parameter:
+
+$$ \hat{b}_{k,j} = \frac{1}{\lambda + n_{k,j}} \sum_{q=1}^{n_{k,j}} \left( R_{q} - \hat{\mu} - \sum_{s=1}^{k-1}(b_{s})_{q} \right)$$
+
+To see the improvement of RMSE, the model it will start in the most basic form; just obtaining the average or rating and obtain the RMSE. Then each feature will be added in the order movie, user, date and genre. Finally all this features will be incorporated with regularization.
+
+## RMSE without regularization
+The first RMSE obtained is the average effect:
+
+
+```{r rmse_1, echo = FALSE}
+
+#Get average of total ratings
+mu <- mean(edx$rating)
+
+#Get RMSE with only the average rating to see improvement in analysis
+results <- data.frame(Analysis = "Average of ratings",RMSE= RMSE(validation$rating,mu))
+results %>% knitr::kable()
+
+```
+
+The value RMSE = 1.0612018 is considered to our base, the next RMSEs should be lower than this. The next obtained RMSE has a value of 0.9439087, this includes the movie effect. As expected, there’s a strong relation between the rating and the movie itself. 
+
+```{r rmse_2, echo = FALSE}
+
+#Obtain b_i by substracting mu and averaging by movieID group
+b_i <- edx %>% mutate(rating = rating - mu) %>% 
+  group_by(movieId) %>% summarise(b_i = mean(rating))
+
+#Obtain b_i for validation data to obtain RMSE
+validation_bi <- validation %>% left_join(b_i, by= 'movieId') %>% .$b_i
+
+#RMSE with mu and b_i effect
+results <- bind_rows(results, data_frame(Analysis="Average and Movie Effect",  
+                                RMSE = RMSE(validation$rating, mu+validation_bi)))
+results %>% knitr::kable()
+
+```
+
+The next RMSE = 0.8653488 which also indicates a strong relationship with the users. The first to effects improve a lot the initial RMSE
+
+```{r rmse_3, echo = FALSE}
+
+#Obtain b_u by substracting mu and b_i
+b_u <- edx %>% left_join(b_i, by='movieId') %>%
+  mutate(rating = rating - mu - b_i) %>% 
+  group_by(userId) %>% summarise(b_u = mean(rating))
+
+#Obtain b_u for validation data to obtain RMSE
+validation_bu <- validation %>% left_join(b_u, by= 'userId') %>% .$b_u
+
+#RMSE with mu, b_i and b_u effect
+results <- bind_rows(results, data_frame(Analysis="Average, Movie and User Effect",  
+          RMSE = RMSE(validation$rating, mu+validation_bi+validation_bu)))
+results %>% knitr::kable()
+
+```
+
+Adding the year effect gives an RMSE of 0.8653369:
+
+```{r rmse_4, echo = FALSE}
+
+#Obtain b_t by substracting mu, b_i and b_u
+b_t <- edx %>% left_join(b_i, by='movieId') %>% 
+  left_join(b_u, by='userId') %>%
+  mutate(rating = rating - mu - b_i - b_u) %>% 
+  group_by(date) %>% summarise(b_t = mean(rating))
+
+#Obtain b_t for validation data to obtain RMSE
+validation_bt <- validation %>% left_join(b_t, by= 'date') %>% .$b_t
+
+#RMSE with mu, b_i, b_u and b_t effect
+results <- bind_rows(results, data_frame(Analysis="Average, Movie, User and Year Effect",  
+          RMSE = RMSE(validation$rating, mu+validation_bi+
+                        validation_bu+validation_bt)))
+results %>% knitr::kable()
+
+```
+
+Finally the last RMSE without regularization and including all the features is:
+
+```{r rmse_5, echo = FALSE}
+
+#Obtain b_g by substracting mu, b_i, b_u and b_t
+b_g <- edx %>% left_join(b_i, by='movieId') %>% 
+  left_join(b_u, by='userId') %>%
+  left_join(b_t, by='date') %>%
+  mutate(rating = rating - mu - b_i - b_u - b_t) %>% 
+  group_by(genres) %>% summarise(b_g = mean(rating))
+
+#Obtain b_t for validation data to obtain RMSE
+validation_bg <- validation %>% left_join(b_g, by= 'genres') %>% .$b_g
+
+#RMSE with mu, b_i, b_u and b_t effect
+results <- bind_rows(results, data_frame(Analysis="Average, Movie, User, Year and Genre Effect",  
+                                         RMSE = RMSE(validation$rating, 
+                                                     mu+validation_bi+
+                                                       validation_bu+
+                                                       validation_bt+
+                                                       validation_bg)))
+results %>% knitr::kable()
+
+```
+
+## Regularization
+
+To add regularization it is needed separate our edx data into a train set and a cross-validation set this process is similar to obtain the edx and validation datasets from the whole data. Here is the code that creates this to datasets:
+
+```{r test_cv, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+#Divide edx into train_set and cv_set (Cross Validation set)
+#Method similar to obtain edx and validation data
+set.seed(1, sample.kind="Rounding")
+#Cross Validation  will be 10% of edx
+cv_index <- createDataPartition(y = edx$rating, times = 1, p = 0.1, list = FALSE)
+train_set <- edx[-cv_index,]
+temp <- edx[cv_index,]
+
+# Make sure userId and movieId in cv set are also in train set
+cv_set <- temp %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+# Add rows removed from cv set back into train set
+removed <- anti_join(temp, cv_set)
+train_set <- rbind(train_set, removed)
+
+rm(temp, removed,cv_index)
+
+```
+
+This train set will be uses to obtain the b's with regularization and then use the cross-validation set to observe the best RMSE with different lambdas. Then the value of lambda that gives the lowest RMSE is choosed to obtain the RMSE with the edx and validation data.
+
+Lambda takes values from 0 to 12 in a 0.5 step. The next plot show the values of RMSE with respect of lambda.
+
+```{r rmse_lambdas, echo = FALSE}
+
+#Set values of lambdas
+lambda <- seq(0,12,0.5)
+
+lambda_rmse <- sapply(lambda, function(lambda){
+
+  #Obtain mu
+  
+  mu <- mean(train_set$rating)
+  
+  #Obtain b_i
+  
+  b_i <- train_set %>% mutate(rating = rating - mu) %>% 
+    group_by(movieId) %>% summarise(b_i = sum(rating)/(n()+lambda))
+  
+  #Obtain b_i
+  
+  b_u <- train_set %>% left_join(b_i, by='movieId') %>%
+    mutate(rating = rating - mu - b_i) %>% 
+    group_by(userId) %>% summarise(b_u = sum(rating)/(n()+lambda))
+  
+  #Obtain b_t
+  
+  b_t <- train_set %>% left_join(b_i, by='movieId') %>% 
+    left_join(b_u, by='userId') %>%
+    mutate(rating = rating - mu - b_i - b_u) %>% 
+    group_by(date) %>% summarise(b_t = sum(rating)/(n()+lambda))
+  
+  #Obtain b_g
+  
+  b_g <- train_set %>% left_join(b_i, by='movieId') %>% 
+    left_join(b_u, by='userId') %>%
+    left_join(b_t, by='date') %>%
+    mutate(rating = rating - mu - b_i - b_u - b_t) %>% 
+    group_by(genres) %>% summarise(b_g = sum(rating)/(n()+lambda))
+  
+  #Obtain b_i, b_u, b_t and b_g for CV set
+  
+  cv_prediction <- cv_set %>% left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>% left_join(b_t, by='date') %>%
+    left_join(b_g, by= 'genres') %>% 
+    mutate(prediction = mu + b_i + b_u + b_t + b_g) %>% .$prediction
+  
+  RMSE(cv_prediction,cv_set$rating)
+
+})
+
+
+#Plot RMSE vs lambda
+data.frame(lambda = lambda, rmse = lambda_rmse) %>% 
+  ggplot(aes(lambda,rmse)) + geom_point() +
+  ggtitle("RMSE vs Lambda") +
+  xlab("Lambda") + ylab("RMSE")
+
+```
+
+The value of lambda that gives the lowest RMSE is: 
+
+```{r optimal_lambda, echo = FALSE}
+
+#Lambda that minimizes RMSE
+optimal_lambda <- lambda[which.min(lambda_rmse)]
+optimal_lambda
+
+```
+
+# Results
+
+With the value of lambda chosen the final RMSE is 0.8644117 as shown in the table:
+
+```{r final_rmse, echo = FALSE}
+
+mu <- mean(edx$rating)
+
+#Obtain b_i
+
+b_i <- edx %>% mutate(rating = rating - mu) %>% 
+  group_by(movieId) %>% summarise(b_i = sum(rating)/(n()+optimal_lambda))
+
+#Obtain b_i
+
+b_u <- edx %>% left_join(b_i, by='movieId') %>%
+  mutate(rating = rating - mu - b_i) %>% 
+  group_by(userId) %>% summarise(b_u = sum(rating)/(n()+optimal_lambda))
+
+#Obtain b_t
+
+b_t <- edx %>% left_join(b_i, by='movieId') %>% 
+  left_join(b_u, by='userId') %>%
+  mutate(rating = rating - mu - b_i - b_u) %>% 
+  group_by(date) %>% summarise(b_t = sum(rating)/(n()+optimal_lambda))
+
+#Obtain b_g
+
+b_g <- edx %>% left_join(b_i, by='movieId') %>% 
+  left_join(b_u, by='userId') %>%
+  left_join(b_t, by='date') %>%
+  mutate(rating = rating - mu - b_i - b_u - b_t) %>% 
+  group_by(genres) %>% summarise(b_g = sum(rating)/(n()+optimal_lambda))
+
+#Obtain b_i, b_u, b_t and b_g for validation set
+
+validation_prediction <- validation %>% left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>% left_join(b_t, by='date') %>%
+  left_join(b_g, by= 'genres') %>% 
+  mutate(prediction = mu + b_i + b_u + b_t + b_g) %>% .$prediction
+
+#RMSE with mu, b_i, b_u and b_t  with regularization effect
+
+results <- 
+  bind_rows(results, data_frame(Analysis=
+                                  "Average, Movie, User, Year and Genre Effect with Regularization",  
+                                         RMSE = RMSE(validation$rating, 
+                                                     validation_prediction)))
+results %>% knitr::kable()
+
+```
+
+This RMSE achieves the task to be lower than 0.86490 which was the main objective of this project. Observing the performance of RMSE in every step shows that the movie and user effects have more weight than the rest of effects. The rest of the effects added improve the RMSE a little compared to the first ones. This indicates in this linear model, the main task is to improve the movie and user effect.
+
+# Conclusions
+
+This model gives a good prediction of the movie ratings given by a user. Although this approach doesn’t involve a lot of machine learning technique it fulfills its purpose. The advantage of this approach is that doesn’t require a lot of computational power and can be used to have a good approximations of the ratings and can be portioned to see the effects of each feature.
+
+The next steps to improve the model are to experiment with other approaches. The first one is see the effect of induvial ratings since the effect of the combinations doesn’t improve a lot. Another approach is to use month of the premier as a feature since in a year there’s a cycle of what type of movies are premiered; for example, in the summer usually are premiered blockbusters movies and this could affect the rating. 
+
+There could be major improvements by introducing more machine learning techniques like Matrix Factorization, kNN, Random Forest, etc. This implicates a bigger computational cost, so there’s a good chance that it can’t be done in an ordinary computer. 
+
